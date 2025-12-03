@@ -1,0 +1,398 @@
+// frontline_cpp.cpp
+// Metal-Slug style side-view game (C++ + raylib) with moving clouds and enemy bullets.
+
+#include "raylib.h"
+#include <vector>
+#include <string>
+#include <cmath>
+
+// ---------------- Settings ----------------
+const int SCREEN_W = 1024;
+const int SCREEN_H = 576;
+const int GROUND_Y  = 480;
+
+const int PLAYER_W = 48;
+const int PLAYER_H = 48;
+const float PLAYER_SPEED = 260.0f;
+const float JUMP_FORCE = 520.0f;
+const float GRAVITY = 1400.0f;
+const int PLAYER_MAX_HEALTH = 100;
+
+const int MAX_BULLETS = 12;
+const float BULLET_SPEED = 720.0f;
+
+const int ENEMY_W = 44;
+const int ENEMY_H = 48;
+const float ENEMY_BASE_SPEED = 90.0f;
+const int MAX_ENEMIES = 6;
+const float ENEMY_SPAWN_INTERVAL = 1.0f; // seconds
+
+const int MAX_ENEMY_BULLETS = 24;
+const float ENEMY_BULLET_SPEED = 400.0f;
+
+const int MAX_CLOUDS = 8;
+const float CLOUD_SPEED = 30.0f;
+
+// ---------------- Utility ----------------
+inline bool RectsOverlap(const Rectangle &a, const Rectangle &b) {
+    return !( (a.x + a.width < b.x) || (a.x > b.x + b.width) ||
+              (a.y + a.height < b.y) || (a.y > b.y + b.height) );
+}
+
+// ---------------- Classes ----------------
+class Bullet {
+public:
+    Vector2 pos{0,0};
+    Vector2 vel{0,0};
+    bool active{false};
+
+    void update(float dt) {
+        if (!active) return;
+        pos.x += vel.x * dt;
+        pos.y += vel.y * dt;
+        if (pos.x < -20 || pos.x > SCREEN_W + 20 || pos.y < -20 || pos.y > SCREEN_H+20)
+            active = false;
+    }
+
+    void draw() {
+        if (!active) return;
+        DrawCircleV(pos, 6, YELLOW);
+    }
+};
+
+class EnemyBullet {
+public:
+    Vector2 pos{0,0};
+    Vector2 vel{0,0};
+    bool active{false};
+
+    void update(float dt) {
+        if(!active) return;
+        pos.x += vel.x * dt;
+        pos.y += vel.y * dt;
+        if (pos.x < -20 || pos.x > SCREEN_W+20 || pos.y < -20 || pos.y > SCREEN_H+20)
+            active = false;
+    }
+
+    void draw() {
+        if(!active) return;
+        DrawCircleV(pos, 5, RED);
+    }
+};
+
+class Enemy {
+public:
+    Vector2 pos{0,0};
+    Vector2 vel{0,0};
+    bool active{false};
+    int health{0};
+
+    void spawn(float x) {
+        active = true;
+        health = 30;
+        pos.x = x;
+        pos.y = GROUND_Y - ENEMY_H;
+        vel.x = -(ENEMY_BASE_SPEED + GetRandomValue(0,30));
+    }
+
+    void update(float dt) {
+        if (!active) return;
+        pos.x += vel.x * dt;
+        if (pos.x < -120) active = false;
+    }
+
+    void draw(Texture2D &texEnemy) {
+        if (!active) return;
+        Rectangle src = { 0.0f, 0.0f, (float)texEnemy.width, (float)texEnemy.height };
+        Rectangle dst = { pos.x, pos.y, (float)ENEMY_W, (float)ENEMY_H };
+        Rectangle srcFlip = { (float)texEnemy.width, 0.0f, -(float)texEnemy.width, (float)texEnemy.height };
+        DrawTexturePro(texEnemy, srcFlip, dst, {0,0}, 0.0f, WHITE);
+    }
+};
+
+class Player {
+public:
+    Vector2 pos{120, (float)(GROUND_Y - PLAYER_H)};
+    Vector2 vel{0,0};
+    bool onGround{true};
+    bool facingRight{true};
+    int health{PLAYER_MAX_HEALTH};
+
+    void update(float dt) {
+        vel.y += GRAVITY * dt;
+        pos.x += vel.x * dt;
+        pos.y += vel.y * dt;
+
+        if (pos.y >= GROUND_Y - PLAYER_H) {
+            pos.y = GROUND_Y - PLAYER_H;
+            vel.y = 0;
+            onGround = true;
+        }
+        if (pos.x < 0) pos.x = 0;
+        if (pos.x + PLAYER_W > SCREEN_W) pos.x = SCREEN_W - PLAYER_W;
+    }
+
+    void draw(Texture2D &texPlayer, float bob) {
+        Rectangle src = { 0.0f, 0.0f, (float)texPlayer.width, (float)texPlayer.height };
+        Rectangle dst = { pos.x, pos.y + bob, (float)PLAYER_W, (float)PLAYER_H };
+        if (facingRight) DrawTexturePro(texPlayer, src, dst, {0,0}, 0.0f, WHITE);
+        else {
+            Rectangle srcFlip = { (float)texPlayer.width, 0.0f, -(float)texPlayer.width, (float)texPlayer.height };
+            DrawTexturePro(texPlayer, srcFlip, dst, {0,0}, 0.0f, WHITE);
+        }
+    }
+};
+
+class Cloud {
+public:
+    Vector2 pos;
+    float width, height;
+    float speed;
+
+    Cloud() {
+        width = (float)GetRandomValue(80,180);
+        height = width/2;
+        pos = { (float)GetRandomValue(0, SCREEN_W), (float)GetRandomValue(50,200) };
+        speed = CLOUD_SPEED * ((float)GetRandomValue(8,12)/10.0f);
+    }
+
+    void update(float dt) {
+        pos.x += speed * dt;
+        if (pos.x > SCREEN_W + width) pos.x = -width;
+    }
+
+    void draw() {
+        DrawRectangleRounded({pos.x, pos.y, width, height}, 0.5f, 8, WHITE);
+    }
+};
+
+// ---------------- Game ----------------
+class Game {
+public:
+    Texture2D texPlayer{0};
+    Texture2D texEnemy{0};
+
+    Player player;
+    std::vector<Bullet> bullets;
+    std::vector<Enemy> enemies;
+    std::vector<EnemyBullet> enemyBullets;
+    std::vector<Cloud> clouds;
+
+    float enemySpawnTimer{0.0f};
+    int score{0};
+    bool gameOver{false};
+    float walkAnim{0.0f};
+
+    Game() {
+        bullets.resize(MAX_BULLETS);
+        enemies.resize(MAX_ENEMIES);
+        enemyBullets.resize(MAX_ENEMY_BULLETS);
+        clouds.resize(MAX_CLOUDS);
+    }
+
+    bool loadTextures(const std::string &playerPath, const std::string &enemyPath) {
+        if (FileExists(playerPath.c_str())) texPlayer = LoadTexture(playerPath.c_str());
+        else { Image img = GenImageColor(1,1,WHITE); texPlayer = LoadTextureFromImage(img); UnloadImage(img); }
+
+        if (FileExists(enemyPath.c_str())) texEnemy = LoadTexture(enemyPath.c_str());
+        else { Image img = GenImageColor(1,1,WHITE); texEnemy = LoadTextureFromImage(img); UnloadImage(img); }
+
+        return true;
+    }
+
+    void unloadTextures() {
+        if (texPlayer.id > 0) UnloadTexture(texPlayer);
+        if (texEnemy.id > 0) UnloadTexture(texEnemy);
+    }
+
+    void reset() {
+        player = Player();
+        player.pos = {120, (float)(GROUND_Y - PLAYER_H)};
+        player.health = PLAYER_MAX_HEALTH;
+        for (auto &b: bullets) b.active = false;
+        for (auto &e: enemies) e.active = false;
+        for (auto &eb: enemyBullets) eb.active = false;
+        enemySpawnTimer = 0.0f;
+        score = 0;
+        gameOver = false;
+        walkAnim = 0.0f;
+    }
+
+    void spawnEnemy() {
+        for (auto &e: enemies) {
+            if (!e.active) {
+                float x = (float)GetRandomValue(SCREEN_W + 20, SCREEN_W + 220);
+                e.spawn(x);
+                break;
+            }
+        }
+    }
+
+    void fireBullet() {
+        for (auto &b: bullets) {
+            if (!b.active) {
+                b.active = true;
+                b.pos.x = player.pos.x + (player.facingRight ? PLAYER_W - 6 : 6);
+                b.pos.y = player.pos.y + PLAYER_H * 0.45f;
+                b.vel.x = (player.facingRight ? 1.0f : -1.0f) * BULLET_SPEED;
+                b.vel.y = 0;
+                break;
+            }
+        }
+    }
+
+    void fireEnemyBullets() {
+        for(auto &e: enemies) {
+            if(!e.active) continue;
+            if(GetRandomValue(0,1000)<6){ // random shoot chance
+                for(auto &eb: enemyBullets) {
+                    if(!eb.active) {
+                        eb.pos = { e.pos.x+ENEMY_W/2.0f, e.pos.y+ENEMY_H/2.0f };
+                        Vector2 dir = { player.pos.x+PLAYER_W/2.0f - eb.pos.x, player.pos.y+PLAYER_H/2.0f - eb.pos.y };
+                        float len = sqrtf(dir.x*dir.x + dir.y*dir.y);
+                        dir.x/=len; dir.y/=len;
+                        eb.vel = { dir.x*ENEMY_BULLET_SPEED, dir.y*ENEMY_BULLET_SPEED };
+                        eb.active = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    void update(float dt) {
+        if (!gameOver) {
+            float move = 0.0f;
+            if(IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) move+=1.0f;
+            if(IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) move-=1.0f;
+            player.vel.x = move * PLAYER_SPEED;
+            if(move>0) player.facingRight = true;
+            else if(move<0) player.facingRight = false;
+
+            if((IsKeyPressed(KEY_SPACE)||IsKeyPressed(KEY_W)||IsKeyPressed(KEY_UP)) && player.onGround){
+                player.vel.y = -JUMP_FORCE;
+                player.onGround = false;
+            }
+
+            if(IsKeyPressed(KEY_J) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) fireBullet();
+
+            if(move != 0 && player.onGround) walkAnim+=dt*12.0f;
+            else walkAnim = 0.0f;
+
+            enemySpawnTimer+=dt;
+            if(enemySpawnTimer >= ENEMY_SPAWN_INTERVAL){
+                enemySpawnTimer = 0;
+                spawnEnemy();
+            }
+
+            for(auto &b: bullets) b.update(dt);
+            for(auto &e: enemies) e.update(dt);
+            fireEnemyBullets();
+            for(auto &eb: enemyBullets) eb.update(dt);
+            for(auto &c: clouds) c.update(dt);
+
+            // collisions
+            for(auto &e: enemies){
+                if(!e.active) continue;
+                Rectangle er = { e.pos.x, e.pos.y, (float)ENEMY_W, (float)ENEMY_H };
+                Rectangle pr = { player.pos.x, player.pos.y, (float)PLAYER_W, (float)PLAYER_H };
+                if(RectsOverlap(er,pr)){
+                    player.health -= 18;
+                    e.active = false;
+                    if(player.health<=0){ player.health=0; gameOver=true; }
+                    continue;
+                }
+                for(auto &b: bullets){
+                    if(!b.active) continue;
+                    Rectangle br = { b.pos.x-6,b.pos.y-6,12,12 };
+                    if(RectsOverlap(br,er)){
+                        b.active = false;
+                        e.health -= 20;
+                        if(e.health<=0){ e.active=false; score+=10; }
+                        break;
+                    }
+                }
+            }
+
+            // enemy bullets hit player
+            for(auto &eb: enemyBullets){
+                if(!eb.active) continue;
+                Rectangle pr = { player.pos.x, player.pos.y, (float)PLAYER_W, (float)PLAYER_H };
+                Rectangle br = { eb.pos.x-5, eb.pos.y-5, 10, 10 };
+                if(RectsOverlap(br,pr)){
+                    player.health -= 10;
+                    eb.active = false;
+                    if(player.health<=0){ player.health=0; gameOver=true; }
+                }
+            }
+
+            player.update(dt);
+        }
+
+        if(gameOver && IsKeyPressed(KEY_R)) reset();
+    }
+
+    void draw() {
+        ClearBackground({140,200,255,255});
+        DrawRectangle(0, GROUND_Y, SCREEN_W, SCREEN_H-GROUND_Y, {80,160,80,255});
+        DrawTriangle({180,(float)GROUND_Y},{300,200},{420,(float)GROUND_Y},{100,120,140,255});
+        DrawTriangle({560,(float)GROUND_Y},{700,160},{840,(float)GROUND_Y},{100,120,140,255});
+
+        for(auto &c: clouds) c.draw();
+
+        float bob = 0.0f;
+        if(walkAnim!=0.0f && player.onGround) bob = sinf(walkAnim)*4.0f;
+        if(!player.onGround) bob=0.0f;
+
+        player.draw(texPlayer,bob);
+        for(auto &b: bullets) b.draw();
+        for(auto &e: enemies) e.draw(texEnemy);
+        for(auto &eb: enemyBullets) eb.draw();
+
+        int barW = 320;
+        int bx=16,by=16;
+        DrawRectangle(bx-2,by-2,barW+4,26,BLACK);
+        float pct = (float)player.health/(float)PLAYER_MAX_HEALTH;
+        DrawRectangle(bx,by,(int)(barW*pct),20,LIME);
+        DrawRectangleLines(bx,by,barW,20,BLACK);
+        DrawText(TextFormat("Health: %i/%i",player.health,PLAYER_MAX_HEALTH),bx+barW+8,by,14,BLACK);
+        DrawText(TextFormat("Score: %i",score),SCREEN_W-160,18,20,DARKBLUE);
+        DrawText("Move: A/D or <- ->   Jump: W/Space   Shoot: J or Left Click",12,SCREEN_H-26,14,GRAY);
+
+        if(gameOver){
+            DrawRectangle(0,0,SCREEN_W,SCREEN_H,Fade(BLACK,0.5f));
+            DrawText("GAME OVER",SCREEN_W/2-140,SCREEN_H/2-40,48,RAYWHITE);
+            DrawText(TextFormat("Final Score: %i",score),SCREEN_W/2-120,SCREEN_H/2+8,24,RAYWHITE);
+            DrawText("Press R to restart",SCREEN_W/2-110,SCREEN_H/2+56,20,LIGHTGRAY);
+        }
+    }
+};
+
+// ---------------- Main ----------------
+int main() {
+    InitWindow(SCREEN_W, SCREEN_H, "Frontline - C++ Metal Slug Style");
+    InitAudioDevice();
+    SetTargetFPS(60);
+
+    Game game;
+
+    const std::string playerPath = "Character.png";
+    const std::string enemyPath  = "Enemy.png";
+
+    game.loadTextures(playerPath, enemyPath);
+    game.reset();
+
+    while(!WindowShouldClose()){
+        float dt = GetFrameTime();
+        game.update(dt);
+        BeginDrawing();
+            game.draw();
+        EndDrawing();
+    }
+
+    game.unloadTextures();
+
+    CloseAudioDevice();
+    CloseWindow();
+    return 0;
+}
